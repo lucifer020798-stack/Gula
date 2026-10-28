@@ -1,0 +1,92 @@
+name: Universal Zip to APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Unzip and Build APK
+        run: |
+          ZIP_FILE=$(find . -maxdepth 2 -iname "*.zip" | head -n 1)
+          echo "Found zip file: $ZIP_FILE"
+          unzip -o "$ZIP_FILE" -d unzipped_project
+          ls -la unzipped_project
+
+          # Look for root Android project (settings.gradle or gradlew first)
+          ROOT_MARKER=$(find unzipped_project \( -name "settings.gradle*" -o -name "gradlew" \) | head -n 1)
+          if [ -z "$ROOT_MARKER" ]; then
+            ROOT_MARKER=$(find unzipped_project -name "build.gradle*" | awk '{print length, $0}' | sort -n | head -n 1 | cut -d" " -f2-)
+          fi
+
+          if [ -n "$ROOT_MARKER" ]; then
+            PROJECT_DIR=$(dirname "$ROOT_MARKER")
+            echo "Building Android Project in: $PROJECT_DIR"
+            cd "$PROJECT_DIR"
+            if [ -f "./gradlew" ]; then
+              chmod +x ./gradlew
+              ./gradlew assembleDebug --stacktrace
+            else
+              gradle assembleDebug --stacktrace
+            fi
+            APK_PATH=$(find . -name "*.apk" | head -n 1)
+            cp "$APK_PATH" "$GITHUB_WORKSPACE/App-Ready.apk"
+          else
+            echo "No Gradle project found. Wrapping HTML/Web Game into Android APK..."
+            HTML_FILE=$(find unzipped_project -iname "*.html" | head -n 1)
+            if [ -z "$HTML_FILE" ]; then
+              echo "ERROR: No Android project or HTML file found inside the zip!"
+              find unzipped_project -maxdepth 3
+              exit 1
+            fi
+            WEB_DIR=$(dirname "$HTML_FILE")
+            HTML_NAME=$(basename "$HTML_FILE")
+            mkdir -p web_wrapper/www
+            cp -r "$WEB_DIR"/* web_wrapper/www/
+            if [ "$HTML_NAME" != "index.html" ]; then
+              cp "web_wrapper/www/$HTML_NAME" "web_wrapper/www/index.html"
+            fi
+            cd web_wrapper
+            npm init -y
+            npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+            npx cap init "ShadowLegends" "com.shadowlegends.game" --web-dir www
+            npx cap add android
+            cd android
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace
+            APK_PATH=$(find . -name "*.apk" | head -n 1)
+            cp "$APK_PATH" "$GITHUB_WORKSPACE/App-Ready.apk"
+          fi
+
+      - name: Upload to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: App-Ready-APK
+          path: ./App-Ready.apk
+
+      - name: Publish Direct APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: "Ready APK (Build #${{ github.run_number }})"
+          files: ./App-Ready.apk
